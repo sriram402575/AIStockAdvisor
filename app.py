@@ -297,13 +297,34 @@ if st.button("🔎 Analyze Stock", use_container_width=True):
                         except Exception:
                             pass
                         return "⚪ Neutral"
-                    for n in news[:5]:
-                        title = n['title']
+                    count = 0
+                    for n in news:
+                        # Defensive: skip if 'title' or 'link' missing
+                        title = n.get('title')
+                        link = n.get('link')
+                        provider = n.get('provider', 'Unknown')
+                        pubtime = n.get('providerPublishTime', '')
                         summary = n.get('summary', '')
-                        text = title + ' ' + summary
+                        if not title or not link:
+                            continue
+                        text = f"{title} {summary}"
                         sentiment = finbert_sentiment(text)
-                        st.markdown(f"- [{title}]({n['link']}) ({n['provider']}, {n['providerPublishTime']:%Y-%m-%d})")
+                        # Defensive: format date if possible
+                        try:
+                            if isinstance(pubtime, (int, float)):
+                                from datetime import datetime
+                                pubtime_fmt = datetime.fromtimestamp(pubtime).strftime('%Y-%m-%d')
+                            elif hasattr(pubtime, 'strftime'):
+                                pubtime_fmt = pubtime.strftime('%Y-%m-%d')
+                            else:
+                                pubtime_fmt = str(pubtime)
+                        except Exception:
+                            pubtime_fmt = ''
+                        st.markdown(f"- [{title}]({link}) ({provider}, {pubtime_fmt})")
                         st.caption(f"Sentiment: {sentiment}")
+                        count += 1
+                        if count >= 5:
+                            break
                 else:
                     st.info("No recent news found.")
             except Exception as e:
