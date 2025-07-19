@@ -7,3 +7,4 @@ shap
 xgboost
 plotly
 requests
+ta
