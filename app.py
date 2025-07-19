@@ -1,10 +1,12 @@
 
 
+
 import plotly.graph_objs as go
 import pandas as pd
 import streamlit as st
 from stock_data import fetch_stock_data
 from advisor import get_advice
+from model import train_incremental_model, predict_incremental
 
 # --- Caching for speed ---
 @st.cache_data(show_spinner=False, max_entries=50)
@@ -51,9 +53,13 @@ body, .stApp { background: linear-gradient(135deg, #181c24 0%, #232a36 100%) !im
 </style>
 """, unsafe_allow_html=True)
 
+
 st.markdown('<div class="big-title">📈 AI Stock Advisor <span style="font-size:0.7em; color:#283593;">(India)</span></div>', unsafe_allow_html=True)
 st.markdown('<div class="subtitle">Get actionable stock recommendations, news, fundamentals, ML predictions, and more!</div>', unsafe_allow_html=True)
 
+# --- Search box under main title ---
+st.markdown("<div style='margin-bottom: 1.5em'></div>", unsafe_allow_html=True)
+search_stock = st.text_input("Enter NSE Symbol (e.g. RELIANCE)", value="RELIANCE", key="main_search")
 
 # Remove duplicate set_page_config and use a more stylish title
 st.markdown('<div class="divider"></div>', unsafe_allow_html=True)
@@ -82,10 +88,8 @@ def get_mock_sentiment_trend(symbol, days=7):
         'Reddit': reddit_scores
     })
 
+
 with st.sidebar:
-    st.markdown("### 🔍 Stock Search")
-    search_stock = st.text_input("Enter NSE Symbol (e.g. RELIANCE)", value="RELIANCE")
-    st.markdown("---")
     st.markdown("### 💡 Top Buy Suggestions")
     # Precompute buy suggestions for sidebar, show loading spinner
     with st.spinner("Screening top stocks..."):
@@ -109,33 +113,23 @@ with st.sidebar:
 
 # --- Main area: Stock selection and analysis ---
 
-# --- Stock Picker Section ---
-st.markdown("<div class='section-title'>🎯 Quick Stock Picker</div>", unsafe_allow_html=True)
 
-# Stylish stock picker buttons
-cols = st.columns(5)
-selected_suggestion = None
-for i, stock in enumerate(suggested_stocks):
-    if cols[i % 5].button(f"{stock}", key=f"btn_{stock}"):
-        selected_suggestion = stock
-
-user_input = selected_suggestion or search_stock
+# --- Stock Search Section ---
+st.markdown("<div class='section-title'>🔍 Stock Search</div>", unsafe_allow_html=True)
+user_input = search_stock
 symbol = user_input.strip().upper() + ".NS"
 
+# Search button (replaces quick picker)
+search_clicked = st.button("🔎 Search & Analyze Stock", use_container_width=True)
 
 
-if st.button("🔎 Analyze Stock", use_container_width=True):
+
+if search_clicked:
     with st.spinner("Fetching data and analyzing..."):
         try:
             import yfinance as yf
             from datetime import datetime
             import numpy as np
-            from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
-            from sklearn.model_selection import train_test_split
-            from sklearn.metrics import mean_squared_error, accuracy_score
-            import shap
-            import xgboost as xgb
-
             # --- Main Analysis ---
             df = cached_fetch_stock_data(symbol)
             decision, target, stoploss = get_advice(df)  # Not cached here, as it uses the latest df
@@ -153,74 +147,17 @@ if st.button("🔎 Analyze Stock", use_container_width=True):
             with ind_cols[2]:
                 st.markdown(f"<div class='metric-card'><span style='font-size:1.1em;'>💰 Close Price</span><br><b>{latest['Close']:.2f}</b></div>", unsafe_allow_html=True)
 
-            # --- ML-based Price Prediction (RandomForest) ---
-            st.markdown("<div class='section-title'>🤖 ML Price Prediction (RandomForest)</div>", unsafe_allow_html=True)
-            ml_df = df.dropna().copy()
-            ml_features = ["rsi", "macd", "macd_signal", "sma_20", "sma_50"]
-            if len(ml_df) > 60:
-                ml_df["target"] = ml_df["Close"].shift(-1)
-                ml_df = ml_df.dropna(subset=ml_features + ["target"]).copy()  # Ensure all features and target are present
-                # Defensive: ensure all columns are same length and index-aligned
-                X = ml_df[ml_features].to_numpy()
-                y = ml_df["target"].to_numpy()
-                min_len = min(len(X), len(y))
-                X = X[:min_len]
-                y = y[:min_len]
-                X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, shuffle=False)
-                rf = RandomForestRegressor(n_estimators=100, random_state=42)
-                rf.fit(X_train, y_train)
-                y_pred = rf.predict([latest[ml_features].values])[0]
-                test_pred = rf.predict(X_test)
-                mse = mean_squared_error(y_test, test_pred)
-                st.info(f"Predicted next close: ₹{y_pred:.2f} (MSE: {mse:.2f})")
-                # SHAP feature importance
-                explainer = shap.TreeExplainer(rf)
-                shap_values = explainer.shap_values(X_test)
-                st.markdown("**Feature Importance (SHAP):**")
-                shap_df = pd.DataFrame({"Feature": ml_features, "Importance": np.abs(shap_values).mean(axis=0)})
-                st.bar_chart(shap_df.set_index("Feature"))
+            # --- Incremental ML Classification ---
+            st.markdown("<div class='section-title'>🤖 Incremental ML Buy/Sell Classification (SGDClassifier)</div>", unsafe_allow_html=True)
+            # Train or update the incremental model with the latest data
+            model = train_incremental_model(df)
+            # Predict for the latest row
+            pred = predict_incremental(df.tail(1))
+            label_map = {1: "Buy", 0: "Sell/Hold"}
+            if pred is not None:
+                st.info(f"Incremental ML Model Suggestion: {label_map.get(pred[0], 'Hold')}")
             else:
-                st.info("Not enough data for ML prediction.")
-
-            # --- ML-based Buy/Sell Classification (RandomForest) ---
-            st.markdown("<div class='section-title'>🤖 ML Buy/Sell/Hold Classification</div>", unsafe_allow_html=True)
-            if len(ml_df) > 60:
-                # Simple rule: 1=Buy if next close > today close*1.01, -1=Sell if <0.99, else 0
-                ml_df["label"] = 0
-                ml_df.loc[ml_df["target"] > ml_df["Close"]*1.01, "label"] = 1
-                ml_df.loc[ml_df["target"] < ml_df["Close"]*0.99, "label"] = -1
-                ml_df = ml_df.dropna(subset=ml_features + ["label"]).copy()  # Defensive
-                Xc = ml_df[ml_features].to_numpy()
-                yc = ml_df["label"].to_numpy()
-                # Defensive: ensure all arrays are same length and index-aligned for SHAP
-                min_len = min(len(Xc), len(yc))
-                Xc = Xc[:min_len]
-                yc = yc[:min_len]
-                # SHAP sometimes expects at least 2 classes in test set, so filter accordingly
-                if len(set(yc)) < 2:
-                    st.info("Not enough class variety for SHAP feature importance.")
-                else:
-                    Xc_train, Xc_test, yc_train, yc_test = train_test_split(Xc, yc, test_size=0.2, shuffle=False)
-                    clf = RandomForestClassifier(n_estimators=100, random_state=42)
-                    clf.fit(Xc_train, yc_train)
-                    pred_label = clf.predict([latest[ml_features].values])[0]
-                    label_map = {1: "Buy", -1: "Sell", 0: "Hold"}
-                    st.info(f"ML Model Suggestion: {label_map.get(pred_label, 'Hold')}")
-                    test_pred = clf.predict(Xc_test)
-                    acc = accuracy_score(yc_test, test_pred)
-                    st.caption(f"ML Classifier Test Accuracy: {acc:.2f}")
-                    # SHAP for classifier
-                    explainer_c = shap.TreeExplainer(clf)
-                    shap_values_c = explainer_c.shap_values(Xc_test)
-                    st.markdown("**ML Classifier Feature Importance (SHAP):**")
-                    # Defensive: check shape before plotting
-                    if isinstance(shap_values_c, list) and len(shap_values_c) > 1 and shap_values_c[1].shape[1] == len(ml_features):
-                        shap_df_c = pd.DataFrame({"Feature": ml_features, "Importance": np.abs(shap_values_c[1]).mean(axis=0)})
-                        st.bar_chart(shap_df_c.set_index("Feature"))
-                    else:
-                        st.info("Not enough data for SHAP feature importance plot.")
-            else:
-                st.info("Not enough data for ML classification.")
+                st.info("No incremental model found yet. It will be created now.")
 
             # --- Fundamental Data (with advanced metrics and sector comparison) ---
             st.markdown("<div class='section-title'>📑 Key Fundamentals & Sector Comparison</div>", unsafe_allow_html=True)
