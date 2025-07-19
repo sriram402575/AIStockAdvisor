@@ -1,8 +1,9 @@
+streamlit
 pandas
 numpy
 yfinance
 scikit-learn
-ta
-streamlit
-matplotlib
-seaborn
+shap
+xgboost
+plotly
+requests
